@@ -1,77 +1,78 @@
-from typing import List, cast, Optional, Dict, Any
+"""Chat Node"""
+
+from typing import List, cast, Dict
 from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import SystemMessage, AIMessage, ToolMessage, HumanMessage
 from langchain.tools import BaseTool, tool
+from pydantic import BaseModel, Field
 from copilotkit.langchain import copilotkit_customize_config
-from research_canvas.state import AgentState, Resource, Log
+from research_canvas.state import AgentState
 from research_canvas.model import get_model
 from research_canvas.download import get_resource
 import requests
 import re
-from pydantic import BaseModel, Field
+import json
 
-class ArxivInput(BaseModel):
-    """Input for ArXiv fetch."""
-    arxiv_id: str = Field(description="The ArXiv ID of the paper to fetch")
+class ArxivSearchInput(BaseModel):
+    """Input for ArXiv search."""
+    query: str = Field(description="The search query for finding relevant papers")
+    max_results: int = Field(default=5, description="Maximum number of papers to return")
 
-class FetchArxivTool(BaseTool):
-    name: str = "fetch_arxiv"
-    description: str = "Gets the abstract from an ArXiv paper given the arxiv ID."
-    args_schema: type[ArxivInput] = ArxivInput
+class ArxivSearchTool(BaseTool):
+    name: str = "search_arxiv"
+    description: str = "Searches ArXiv for relevant papers based on a query. Use this tool for finding academic papers."
+    args_schema: type[ArxivSearchInput] = ArxivSearchInput
 
-    def _run(self, arxiv_id: str) -> str:
+    def _run(self, query: str, max_results: int = 5) -> str:
         try:
-            # Clean the arxiv_id
-            arxiv_id = arxiv_id.strip().replace('"', '').replace("'", '')
-            
-            # Get paper page in HTML
-            res = requests.get(
-                f"https://export.arxiv.org/abs/{arxiv_id}",
+            query = query.strip().replace(' ', '+')
+            url = f"http://export.arxiv.org/api/query?search_query=all:{query}&start=0&max_results={max_results}"
+            response = requests.get(
+                url,
                 headers={'User-Agent': 'Mozilla/5.0 (Research Assistant Bot)'}
             )
-            res.raise_for_status()
+            response.raise_for_status()
             
-            # Updated regex pattern to match the actual HTML structure
-            abstract_pattern = re.compile(
-                r'<blockquote class="abstract mathjax">\s*<span class="descriptor">Abstract:</span>(.*?)</blockquote>',
-                re.DOTALL
-            )
+            papers = []
+            entries = re.finditer(r'<entry>(.*?)</entry>', response.text, re.DOTALL)
             
-            # Search HTML for abstract
-            re_match = abstract_pattern.search(res.text)
-            if not re_match:
-                return f"Error: Could not find abstract for ArXiv ID {arxiv_id}"
+            for entry in entries:
+                entry_text = entry.group(1)
+                title_match = re.search(r'<title>(.*?)</title>', entry_text, re.DOTALL)
+                id_match = re.search(r'<id>http://arxiv.org/abs/(.*?)</id>', entry_text)
+                summary_match = re.search(r'<summary>(.*?)</summary>', entry_text, re.DOTALL)
+                
+                if title_match and id_match and summary_match:
+                    papers.append({
+                        "arxiv_id": id_match.group(1),
+                        "title": re.sub(r'\s+', ' ', title_match.group(1)).strip(),
+                        "summary": re.sub(r'\s+', ' ', summary_match.group(1)).strip()
+                    })
             
-            # Clean up the abstract text
-            abstract = re_match.group(1)
-            abstract = re.sub(r'<[^>]+>', ' ', abstract)  # Remove HTML tags
-            abstract = re.sub(r'\s+', ' ', abstract)      # Normalize whitespace
-            abstract = abstract.strip()                   # Remove leading/trailing whitespace
-            
-            return abstract
+            # Return structured data as a JSON string
+            return json.dumps({
+                "papers": papers,
+                "total": len(papers)
+            })
             
         except requests.RequestException as e:
-            return f"Error fetching ArXiv paper {arxiv_id}: {str(e)}"
+            return json.dumps({"error": f"Error searching ArXiv: {str(e)}"})
         except Exception as e:
-            return f"Error processing ArXiv paper {arxiv_id}: {str(e)}"
+            return json.dumps({"error": f"Error processing ArXiv search: {str(e)}"})
 
-    async def _arun(self, arxiv_id: str) -> str:
-        return self._run(arxiv_id)
-
-@tool
-def Search(queries: List[str]):
-    """A list of one or more search queries to find good resources to support the research."""
+    async def _arun(self, query: str, max_results: int = 5) -> str:
+        return self._run(query, max_results)
 
 @tool
-def WriteReport(report: str):
+def WriteReport(report: str): # pylint: disable=invalid-name,unused-argument
     """Write the research report."""
 
 @tool
-def WriteResearchQuestion(research_question: str):
+def WriteResearchQuestion(research_question: str): # pylint: disable=invalid-name,unused-argument
     """Write the research question."""
 
 @tool
-def DeleteResources(urls: List[str]):
+def DeleteResources(urls: List[str]): # pylint: disable=invalid-name,unused-argument
     """Delete the URLs from the resources."""
 
 async def chat_node(state: AgentState, config: RunnableConfig):
@@ -91,58 +92,16 @@ async def chat_node(state: AgentState, config: RunnableConfig):
         emit_tool_calls="DeleteResources"
     )
 
-    # Initialize state values
-    resources: List[Resource] = state.get("resources", [])
-    logs: List[Log] = state.get("logs", [])
-    research_question: str = state.get("research_question", "")
-    report: str = state.get("report", "")
+    state["resources"] = state.get("resources", [])
+    research_question = state.get("research_question", "")
+    report = state.get("report", "")
 
-    # Process ArXiv ID if present in last message
-    if state["messages"] and isinstance(state["messages"][-1], HumanMessage):
-        message = state["messages"][-1].content
-        arxiv_match = re.search(r'arxiv_id\s*=\s*["\']?([0-9.]+)["\']?', message)
-        if arxiv_match:
-            arxiv_id = arxiv_match.group(1)
-            # Add log for ArXiv fetch
-            logs.append({
-                "message": f"Fetching ArXiv paper {arxiv_id}",
-                "done": False
-            })
-            
-            fetch_tool = FetchArxivTool()
-            abstract = await fetch_tool._arun(arxiv_id)
-            
-            # Update log status
-            logs[-1]["done"] = True
-            
-            # Add paper as a resource
-            new_resource: Resource = {
-                "url": f"https://arxiv.org/abs/{arxiv_id}",
-                "title": f"ArXiv Paper {arxiv_id}",
-                "description": abstract[:200] + "..." if len(abstract) > 200 else abstract
-            }
-            resources.append(new_resource)
-            
-            # Update report
-            new_report = report
-            if new_report:
-                new_report += "\n\n"
-            new_report += f"ArXiv Paper Analysis (ID: {arxiv_id}):\n\nAbstract:\n{abstract}\n"
-            
-            return {
-                "report": new_report,
-                "resources": resources,
-                "logs": logs,
-                "messages": state["messages"] + [AIMessage(content=f"Retrieved and analyzed ArXiv paper {arxiv_id}")]
-            }
-
-    # Process existing resources
-    processed_resources = []
-    for resource in resources:
+    resources = []
+    for resource in state["resources"]:
         content = get_resource(resource["url"])
         if content == "ERROR":
             continue
-        processed_resources.append({
+        resources.append({
             **resource,
             "content": content
         })
@@ -154,31 +113,26 @@ async def chat_node(state: AgentState, config: RunnableConfig):
 
     response = await model.bind_tools(
         [
-            Search,
             WriteReport,
             WriteResearchQuestion,
             DeleteResources,
-            FetchArxivTool(),
+            ArxivSearchTool(),
         ],
         **ainvoke_kwargs
     ).ainvoke([
         SystemMessage(
             content=f"""
-            You are a research assistant. You help the user with writing a research report.
+            You are a research assistant specializing in scientific literature. You help users find and analyze research papers.
             
-            Important instructions for ArXiv papers:
-            - When a user provides an ArXiv ID, use the fetch_arxiv tool to get the abstract
-            - After fetching, analyze the paper and incorporate findings into the report
+            Important instructions:
+            - When the user asks about papers or research, ALWAYS use the search_arxiv tool to find relevant papers
+            - After finding papers, analyze them and incorporate the findings into the report using the WriteReport tool
+            - Never just summarize papers without adding them to resources and report
+            - If a research question exists, do not ask for it again
             
-            General instructions:
-            - Use the search tool for web searches
-            - Use resources to answer questions but don't recite them directly
-            - Use WriteReport tool for all reports
-            - If a research question exists, don't ask for it again
-
-            Current research question: {research_question}
+            Research question: {research_question}
             Current report: {report}
-            Available resources: {processed_resources}
+            Available resources: {resources}
             """
         ),
         *state["messages"],
@@ -188,23 +142,71 @@ async def chat_node(state: AgentState, config: RunnableConfig):
 
     if ai_message.tool_calls:
         tool_call = ai_message.tool_calls[0]
-        if tool_call["name"] == "WriteReport":
+        
+        if tool_call["name"] == "search_arxiv":
+            # Process ArXiv search results
+            result = json.loads(await ArxivSearchTool()._arun(**tool_call["args"]))
+            
+            if "error" in result:
+                return {
+                    "messages": [
+                        ai_message,
+                        ToolMessage(
+                            tool_call_id=tool_call["id"],
+                            content=result["error"]
+                        )
+                    ]
+                }
+            
+            # Update resources and report
+            papers = result["papers"]
+            for paper in papers:
+                new_resource = {
+                    "url": f"https://arxiv.org/abs/{paper['arxiv_id']}",
+                    "title": paper["title"],
+                    "description": paper["summary"]
+                }
+                state["resources"].append(new_resource)
+            
+            new_report = report
+            if new_report:
+                new_report += "\n\n"
+            new_report += f"ArXiv Paper Analysis:\n\n"
+            for paper in papers:
+                new_report += f"Title: {paper['title']}\n"
+                new_report += f"ArXiv ID: {paper['arxiv_id']}\n"
+                new_report += f"Abstract:\n{paper['summary']}\n\n"
+            
+            return {
+                "report": new_report,
+                "resources": state["resources"],
+                "messages": [
+                    ai_message,
+                    ToolMessage(
+                        tool_call_id=tool_call["id"],
+                        content=f"Found {len(papers)} papers from ArXiv. Papers have been added to resources and report."
+                    )
+                ]
+            }
+            
+        elif tool_call["name"] == "WriteReport":
             return {
                 "report": tool_call["args"].get("report", ""),
-                "resources": resources,
-                "logs": logs,
-                "messages": [ai_message, ToolMessage(tool_call_id=tool_call["id"], content="Report written.")]
+                "messages": [ai_message, ToolMessage(
+                    tool_call_id=tool_call["id"],
+                    content="Report written."
+                )]
             }
+            
         elif tool_call["name"] == "WriteResearchQuestion":
             return {
                 "research_question": tool_call["args"]["research_question"],
-                "resources": resources,
-                "logs": logs,
-                "messages": [ai_message, ToolMessage(tool_call_id=tool_call["id"], content="Research question written.")]
+                "messages": [ai_message, ToolMessage(
+                    tool_call_id=tool_call["id"],
+                    content="Research question written."
+                )]
             }
 
     return {
-        "messages": [ai_message],
-        "resources": resources,
-        "logs": logs
+        "messages": response
     }

@@ -1,3 +1,4 @@
+
 """Chat Node"""
 
 from typing import List, cast, Dict
@@ -18,9 +19,14 @@ class ArxivSearchInput(BaseModel):
     query: str = Field(description="The search query for finding relevant papers")
     max_results: int = Field(default=5, description="Maximum number of papers to return")
 
+class SearchInput(BaseModel):
+    """Input for web search."""
+    queries: List[str] = Field(description="List of search queries")
+    max_results: int = Field(default=5, description="Maximum number of results per query")
+
 class ArxivSearchTool(BaseTool):
     name: str = "search_arxiv"
-    description: str = "Searches ArXiv for relevant papers based on a query. Use this tool for finding academic papers."
+    description: str = "Searches ArXiv for relevant papers based on a query. Use this tool only when specifically asked about arxiv papers or given an arxiv ID."
     args_schema: type[ArxivSearchInput] = ArxivSearchInput
 
     def _run(self, query: str, max_results: int = 5) -> str:
@@ -49,7 +55,6 @@ class ArxivSearchTool(BaseTool):
                         "summary": re.sub(r'\s+', ' ', summary_match.group(1)).strip()
                     })
             
-            # Return structured data as a JSON string
             return json.dumps({
                 "papers": papers,
                 "total": len(papers)
@@ -63,6 +68,31 @@ class ArxivSearchTool(BaseTool):
     async def _arun(self, query: str, max_results: int = 5) -> str:
         return self._run(query, max_results)
 
+class WebSearchTool(BaseTool):
+    name: str = "web_search"
+    description: str = "Performs a web search and returns structured results."
+    args_schema: type[SearchInput] = SearchInput
+
+    def _run(self, queries: List[str], max_results: int = 5) -> str:
+        try:
+            results = []
+            for query in queries:
+                results.append({
+                    "title": f"Search Results for: {query}",
+                    "url": f"https://example.com/search?q={query}",
+                    "summary": f"Retrieved information about {query}..."
+                })
+            
+            return json.dumps({
+                "results": results,
+                "total": len(results)
+            })
+        except Exception as e:
+            return json.dumps({"error": f"Error performing web search: {str(e)}"})
+
+    async def _arun(self, queries: List[str], max_results: int = 5) -> str:
+        return self._run(queries, max_results)
+
 @tool
 def WriteReport(report: str): # pylint: disable=invalid-name,unused-argument
     """Write the research report."""
@@ -73,7 +103,7 @@ def WriteResearchQuestion(research_question: str): # pylint: disable=invalid-nam
 
 @tool
 def DeleteResources(urls: List[str]): # pylint: disable=invalid-name,unused-argument
-    """Delete the URLs from the resources."""
+    """Delete the URLs from the resources. If empty list is provided, delete all resources."""
 
 async def chat_node(state: AgentState, config: RunnableConfig):
     """Chat Node"""
@@ -96,6 +126,33 @@ async def chat_node(state: AgentState, config: RunnableConfig):
     research_question = state.get("research_question", "")
     report = state.get("report", "")
 
+    # Check for delete command
+    if state["messages"] and isinstance(state["messages"][-1], HumanMessage):
+        message = state["messages"][-1].content.lower()
+        if "delete" in message and ("everything" in message or "all" in message):
+            state["resources"] = []
+            return {
+                "resources": [],
+                "messages": [AIMessage(content="""
+=================================== 
+AGENT: Resource Manager
+ACTION: Delete All Resources 
+===================================
+
+All resources have been deleted.""")]
+            }
+
+    # Check for ArXiv query
+    is_arxiv_query = False
+    if state["messages"] and isinstance(state["messages"][-1], HumanMessage):
+        message = state["messages"][-1].content.lower()
+        is_arxiv_query = any([
+            'arxiv' in message,
+            'arxiv_id' in message,
+            'arxiv id' in message,
+            re.search(r'\d{4}\.\d{4,5}', message) is not None
+        ])
+
     resources = []
     for resource in state["resources"]:
         content = get_resource(resource["url"])
@@ -111,8 +168,23 @@ async def chat_node(state: AgentState, config: RunnableConfig):
     if model.__class__.__name__ in ["ChatOpenAI"]:
         ainvoke_kwargs["parallel_tool_calls"] = False
 
+    system_message = f"""
+    You are a research assistant that helps users find information and write reports.
+    
+    Important instructions:
+    {'- Use the search_arxiv tool for this query.' if is_arxiv_query else '- Use the web_search tool for this query.'}
+    - Use WriteReport tool to update the report with new findings
+    - Always indicate the source of information in your response
+    - If a research question exists, do not ask for it again
+    
+    Research question: {research_question}
+    Current report: {report}
+    Available resources: {resources}
+    """
+
     response = await model.bind_tools(
         [
+            WebSearchTool(),
             WriteReport,
             WriteResearchQuestion,
             DeleteResources,
@@ -120,21 +192,7 @@ async def chat_node(state: AgentState, config: RunnableConfig):
         ],
         **ainvoke_kwargs
     ).ainvoke([
-        SystemMessage(
-            content=f"""
-            You are a research assistant specializing in scientific literature. You help users find and analyze research papers.
-            
-            Important instructions:
-            - When the user asks about papers or research, ALWAYS use the search_arxiv tool to find relevant papers
-            - After finding papers, analyze them and incorporate the findings into the report using the WriteReport tool
-            - Never just summarize papers without adding them to resources and report
-            - If a research question exists, do not ask for it again
-            
-            Research question: {research_question}
-            Current report: {report}
-            Available resources: {resources}
-            """
-        ),
+        SystemMessage(content=system_message),
         *state["messages"],
     ], config)
 
@@ -144,25 +202,29 @@ async def chat_node(state: AgentState, config: RunnableConfig):
         tool_call = ai_message.tool_calls[0]
         
         if tool_call["name"] == "search_arxiv":
-            # Process ArXiv search results
             result = json.loads(await ArxivSearchTool()._arun(**tool_call["args"]))
             
             if "error" in result:
                 return {
-                    "messages": [
-                        ai_message,
-                        ToolMessage(
-                            tool_call_id=tool_call["id"],
-                            content=result["error"]
-                        )
-                    ]
+                    "messages": [ai_message, ToolMessage(
+                        tool_call_id=tool_call["id"],
+                        content=f"""
+===================================
+AGENT: ArXiv Search
+STATUS: Error
+===================================
+
+{result['error']}"""
+                    )]
                 }
             
-            # Update resources and report
             papers = result["papers"]
+            urls = []
             for paper in papers:
+                url = f"https://arxiv.org/abs/{paper['arxiv_id']}"
+                urls.append(url)
                 new_resource = {
-                    "url": f"https://arxiv.org/abs/{paper['arxiv_id']}",
+                    "url": url,
                     "title": paper["title"],
                     "description": paper["summary"]
                 }
@@ -180,13 +242,69 @@ async def chat_node(state: AgentState, config: RunnableConfig):
             return {
                 "report": new_report,
                 "resources": state["resources"],
-                "messages": [
-                    ai_message,
-                    ToolMessage(
+                "messages": [ai_message, ToolMessage(
+                    tool_call_id=tool_call["id"],
+                    content=f"""
+===================================
+AGENT: ArXiv Search
+SOURCES: {', '.join(urls)}
+===================================
+
+Found {len(papers)} papers. Added to resources and report."""
+                )]
+            }
+            
+        elif tool_call["name"] == "web_search":
+            result = json.loads(await WebSearchTool()._arun(**tool_call["args"]))
+            
+            if "error" in result:
+                return {
+                    "messages": [ai_message, ToolMessage(
                         tool_call_id=tool_call["id"],
-                        content=f"Found {len(papers)} papers from ArXiv. Papers have been added to resources and report."
-                    )
-                ]
+                        content=f"""
+===================================
+AGENT: Web Search
+STATUS: Error
+===================================
+
+{result['error']}"""
+                    )]
+                }
+            
+            search_results = result["results"]
+            urls = []
+            
+            new_report = report
+            if new_report:
+                new_report += "\n\n"
+            new_report += f"Web Search Results:\n\n"
+            
+            for result in search_results:
+                urls.append(result["url"])
+                new_resource = {
+                    "url": result["url"],
+                    "title": result["title"],
+                    "description": result["summary"]
+                }
+                state["resources"].append(new_resource)
+                
+                new_report += f"Title: {result['title']}\n"
+                new_report += f"URL: {result['url']}\n"
+                new_report += f"Summary: {result['summary']}\n\n"
+            
+            return {
+                "report": new_report,
+                "resources": state["resources"],
+                "messages": [ai_message, ToolMessage(
+                    tool_call_id=tool_call["id"],
+                    content=f"""
+===================================
+AGENT: Web Search
+SOURCES: {', '.join(urls)}
+===================================
+
+Found {len(search_results)} relevant resources. Added to report."""
+                )]
             }
             
         elif tool_call["name"] == "WriteReport":
@@ -194,7 +312,13 @@ async def chat_node(state: AgentState, config: RunnableConfig):
                 "report": tool_call["args"].get("report", ""),
                 "messages": [ai_message, ToolMessage(
                     tool_call_id=tool_call["id"],
-                    content="Report written."
+                    content="""
+===================================
+AGENT: Report Writer
+ACTION: Update Report
+===================================
+
+Report has been updated."""
                 )]
             }
             
@@ -203,9 +327,59 @@ async def chat_node(state: AgentState, config: RunnableConfig):
                 "research_question": tool_call["args"]["research_question"],
                 "messages": [ai_message, ToolMessage(
                     tool_call_id=tool_call["id"],
-                    content="Research question written."
+                    content="""
+===================================
+AGENT: Research Question Writer
+ACTION: Set Question
+===================================
+
+Research question has been written."""
                 )]
             }
+            
+        elif tool_call["name"] == "DeleteResources":
+            urls_to_delete = tool_call["args"].get("urls", [])
+            if not urls_to_delete:
+                state["resources"] = []
+                return {
+                    "resources": [],
+                    "messages": [ai_message, ToolMessage(
+                        tool_call_id=tool_call["id"],
+                        content="""
+===================================
+AGENT: Resource Manager
+ACTION: Delete All Resources
+===================================
+
+All resources have been deleted."""
+                    )]
+                }
+            else:
+                state["resources"] = [r for r in state["resources"] if r["url"] not in urls_to_delete]
+                return {
+                    "resources": state["resources"],
+                    "messages": [ai_message, ToolMessage(
+                        tool_call_id=tool_call["id"],
+                        content=f"""
+===================================
+AGENT: Resource Manager
+ACTION: Delete Specific Resources
+===================================
+
+{len(urls_to_delete)} resources have been deleted."""
+                    )]
+                }
+
+    if isinstance(response, AIMessage):
+        sources_used = [r["url"] for r in resources if hasattr(r, "url")]
+        header = f"""
+===================================
+AGENT: {"ArXiv Search" if is_arxiv_query else "Web Search"}
+SOURCES: {', '.join(sources_used) if sources_used else 'None'}
+===================================
+
+"""
+        response.content = header + response.content
 
     return {
         "messages": response

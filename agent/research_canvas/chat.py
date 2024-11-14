@@ -238,49 +238,58 @@ Agent Identification:
 {'- Use the search_arxiv tool for this query.' if is_arxiv_query else '- Use the web_search tool for this query.'}
 - Use WriteReport tool to update the report with new findings
 - Always indicate the source of information in your response
+- When citing sources, use the format [Title](URL)
+- Include relevant quotes and summaries from sources
 - If a research question exists, do not ask for it again
 
 Report Structure:
 # Research Report
 
 ## Key Points
-- Main discoveries and findings
-- Critical insights from papers
+- Main discoveries and findings from sources
+- Critical insights with source citations
 - Important metrics and results
+
+## Sources Overview
+{chr(10).join([f'- [{r["title"]}]({r["url"]})' for r in resources]) if resources else '- No sources yet'}
 
 ## Main Body
 
 ### Background
-- Research context and significance
+- Research context with source citations
 - Current state of the field
 - Research gaps identified
 
 ### Methodology
-- Research approaches used
+- Research approaches from sources
 - Data collection methods
 - Analysis techniques
 
 ### Results and Analysis
 - Synthesis of key findings
-- Comparison across papers
+- Comparison across sources
 - Statistical significance
 - Key implications
 
+## Source Details
+{chr(10).join([f'### {r["title"]}\n- URL: {r["url"]}\n- Summary: {r["description"]}\n' for r in resources]) if resources else '- No sources yet'}
+
 ## Summary and Conclusions
-- Major findings synthesis
+- Major findings synthesis with citations
 - Research implications
 - Future research directions
 - Practical applications
 
-Research question: {research_question}
-Current report: {report}
-Available resources: {resources}
-
 Format Guidelines:
 - Use markdown headers (##) for sections
 - Use bullet points (*) for lists
-- Include citations [Author, Year]
+- Include citations [Author URL]
 - Use blockquotes (>) for important quotes
+- Always link to sources when citing them
+
+Research question: {research_question}
+Current report: {report}
+Available resources: {resources}
 """
 
     response = await model.bind_tools(
@@ -373,8 +382,9 @@ STATUS: Error
             search_results = result["results"]
             urls = []
             
-            # Replace the report instead of appending
-            new_report = f"Web Search Results:\n\n"
+            # Create a detailed search report
+            new_report = "# Web Search Results Analysis\n\n"
+            new_report += "## Found Resources\n\n"
             
             for result in search_results:
                 urls.append(result["url"])
@@ -386,9 +396,23 @@ STATUS: Error
                 state["resources"].append(new_resource)
                 
                 new_report += f"Title: {result['title']}\n"
+                new_report += f"**Source**: [{result['url']}]({result['url']})\n\n"
                 new_report += f"URL: {result['url']}\n"
                 new_report += f"Summary: {result['summary']}\n\n"
             
+
+
+                # Add synthesis section to report
+            new_report += "## Synthesis of Findings\n\n"
+            new_report += "### Main Themes\n"
+            new_report += "* Summary points from across sources\n"
+            new_report += "* Common findings and patterns\n"
+            new_report += "* Key differences between sources\n\n"
+            
+            current_report = state.get("report", "")
+            if current_report:
+                new_report = current_report + "\n\n" + new_report
+
             return {
                 "report": new_report,
                 "resources": state["resources"],
@@ -405,6 +429,14 @@ Found {len(search_results)} relevant resources. Updated report."""
             }
             
         elif tool_call["name"] == "WriteReport":
+            report_content = tool_call["args"].get("report", "")
+        
+            # Add resource citations and references
+            if state["resources"]:
+                report_content += "\n\n## References and Sources\n\n"
+                for idx, resource in enumerate(state["resources"], 1):
+                    report_content += f"{idx}. [{resource['title']}]({resource['url']})\n"
+                    report_content += f"   - Summary: {resource['description']}\n\n"
             return {
                 "report": tool_call["args"].get("report", ""),  # Replace entire report
                 "messages": [ai_message, ToolMessage(

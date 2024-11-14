@@ -120,6 +120,182 @@ class WebSearchTool(BaseTool):
     async def _arun(self, queries: List[str], max_results: int = 5) -> str:
         return self._run(queries, max_results)
 
+
+
+
+
+from datetime import datetime
+import os
+from fpdf import FPDF
+from typing import Type
+from pydantic import BaseModel, Field
+from langchain.tools import BaseTool
+import re
+
+class SavePDFInput(BaseModel):
+    """Input for PDF saving."""
+    report: str = Field(description="The report content to save as PDF")
+
+class ResearchPDF(FPDF):
+    def __init__(self):
+        super().__init__()
+        self.left_margin = 25
+        self.right_margin = 25
+        self.top_margin = 25
+        self.set_margins(self.left_margin, self.top_margin, self.right_margin)
+        self.set_auto_page_break(True, margin=25)
+        
+    def header(self):
+        self.set_font('Arial', 'B', 16)
+        self.cell(0, 10, 'Research Report', 0, 1, 'C')
+        self.set_font('Arial', 'I', 10)
+        self.cell(0, 10, f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}', 0, 1, 'C')
+        self.ln(10)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('Arial', 'I', 8)
+        self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
+
+    def clean_text(self, text):
+        """Clean text of problematic characters and URLs."""
+        # Remove URLs and replace with cleaner format
+        text = re.sub(r'\[([^\]]+)\]\(([^\)]+)\)', r'\1', text)
+        # Convert to ASCII
+        text = text.encode('ascii', 'replace').decode('ascii')
+        # Remove multiple spaces
+        text = ' '.join(text.split())
+        return text
+
+    def clean_url(self, url):
+        """Clean URL text."""
+        # Remove any problematic characters from URLs
+        return url.strip().replace(' ', '%20')
+
+    def write_title(self, title):
+        """Write a section title."""
+        self.set_font('Arial', 'B', 14)
+        self.cell(0, 10, self.clean_text(title), 0, 1, 'L')
+        self.ln(5)
+
+    def write_subtitle(self, subtitle):
+        """Write a subsection title."""
+        self.set_font('Arial', 'B', 12)
+        self.cell(0, 8, self.clean_text(subtitle), 0, 1, 'L')
+        self.ln(2)
+
+    def write_paragraph(self, text):
+        """Write a paragraph of text."""
+        self.set_font('Arial', '', 11)
+        cleaned_text = self.clean_text(text)
+        effective_width = self.w - self.left_margin - self.right_margin
+        self.multi_cell(effective_width, 6, cleaned_text)
+        self.ln(4)
+
+    def write_bullet_point(self, text):
+        """Write a bullet point."""
+        self.set_font('Arial', '', 11)
+        effective_width = self.w - self.left_margin - self.right_margin - 10
+        x_start = self.get_x()
+        self.cell(5, 6, '-', 0, 0, 'L')
+        self.set_x(x_start + 8)
+        cleaned_text = self.clean_text(text)
+        self.multi_cell(effective_width, 6, cleaned_text)
+        self.ln(2)
+
+    def write_link(self, title, url):
+        """Write a link reference."""
+        self.set_font('Arial', '', 10)
+        effective_width = self.w - self.left_margin - self.right_margin
+        cleaned_title = self.clean_text(title)
+        cleaned_url = self.clean_url(url)
+        self.multi_cell(effective_width, 6, f"{cleaned_title}\n{cleaned_url}")
+        self.ln(2)
+
+class SavePDFTool(BaseTool):
+    name: str = "save_report_pdf"
+    description: str = "Saves the current research report as a PDF file"
+    args_schema: Type[BaseModel] = SavePDFInput
+    
+    def _run(self, report: str) -> str:
+        try:
+            print("Starting PDF generation...")
+            
+            if not os.path.exists('reports'):
+                os.makedirs('reports')
+            
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f'reports/research_report_{timestamp}.pdf'
+            
+            pdf = ResearchPDF()
+            pdf.add_page()
+            
+            # Process report sections
+            sections = report.split('\n\n')
+            in_bullet_list = False
+            
+            for section in sections:
+                if not section.strip():
+                    continue
+                
+                lines = section.strip().split('\n')
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    try:
+                        # Handle different line types
+                        if line.startswith('# '):
+                            pdf.write_title(line[2:])
+                            in_bullet_list = False
+                        elif line.startswith('## '):
+                            pdf.write_subtitle(line[3:])
+                            in_bullet_list = False
+                        elif line.startswith('### '):
+                            pdf.write_subtitle(line[4:])
+                            in_bullet_list = False
+                        elif line.startswith('- ') or line.startswith('* '):
+                            pdf.write_bullet_point(line[2:])
+                            in_bullet_list = True
+                        elif '[' in line and '](' in line and ')' in line:
+                            # Handle links
+                            match = re.match(r'\[(.*?)\]\((.*?)\)', line)
+                            if match:
+                                title, url = match.groups()
+                                pdf.write_link(title, url)
+                            in_bullet_list = False
+                        else:
+                            if in_bullet_list:
+                                pdf.write_bullet_point(line)
+                            else:
+                                pdf.write_paragraph(line)
+                    except Exception as e:
+                        print(f"Error processing line '{line[:50]}...': {str(e)}")
+                        continue
+            
+            pdf.output(filename)
+            
+            if os.path.exists(filename):
+                file_size = os.path.getsize(filename)
+                return f"Report successfully saved as {filename} (Size: {file_size:,} bytes)"
+            else:
+                return "Error: PDF file was not created successfully"
+            
+        except Exception as e:
+            print(f"Error generating PDF: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return f"Error saving PDF: {str(e)}"
+
+    async def _arun(self, report: str) -> str:
+        """Async implementation that calls the sync version."""
+        return self._run(report)
+
+
+
+
+
 @tool
 def WriteReport(report: str): # pylint: disable=invalid-name,unused-argument
     """Write the research report."""
@@ -135,6 +311,9 @@ def DeleteResources(urls: List[str]): # pylint: disable=invalid-name,unused-argu
 async def chat_node(state: AgentState, config: RunnableConfig):
     """Chat Node"""
 
+    # Initialize PDF saving tool
+    pdf_tool = SavePDFTool()
+
     config = copilotkit_customize_config(
         config,
         emit_intermediate_state=[{
@@ -146,20 +325,61 @@ async def chat_node(state: AgentState, config: RunnableConfig):
             "tool": "WriteResearchQuestion",
             "tool_argument": "research_question",
         }],
-        emit_tool_calls="DeleteResources"
+        emit_tool_calls=["DeleteResources", "save_report_pdf"]  # Add PDF tool to emit_tool_calls
     )
 
-    # Initialize or reset state based on new conversation
+    # Check for PDF save command early in the function
     if state["messages"] and isinstance(state["messages"][-1], HumanMessage):
-        # Check if this is a new conversation by looking at the message content
         message = state["messages"][-1].content.lower()
+        if "save" in message and "pdf" in message:
+            report = state.get("report", "")
+            if report:
+                try:
+                    # Directly call the PDF tool
+                    result = pdf_tool._run(report)  # Use _run instead of _arun
+                    print(f"PDF Generation Result: {result}")  # Add debugging
+                    return {
+                        "messages": [AIMessage(content=f"""
+===================================
+AGENT: PDF Generator
+ACTION: Save Report
+STATUS: Success
+===================================
+
+{result}
+
+The PDF has been saved in the 'reports' directory.""")]
+                    }
+                except Exception as e:
+                    print(f"PDF Generation Error: {str(e)}")  # Add debugging
+                    return {
+                        "messages": [AIMessage(content=f"""
+===================================
+AGENT: PDF Generator
+ACTION: Save Report
+STATUS: Error
+===================================
+
+Failed to generate PDF: {str(e)}
+
+Please try again or contact support if the issue persists.""")]
+                    }
+            else:
+                return {
+                    "messages": [AIMessage(content="""
+===================================
+AGENT: PDF Generator
+STATUS: Error
+===================================
+
+No report content available to save as PDF. Please generate a report first by searching for some information.""")]
+                }
         
-        # Reset conditions - add more as needed
+        # Reset conditions
         should_reset = any([
             "new research" in message,
             "start over" in message,
             "new topic" in message,
-            # If this is the first message in a conversation
             len(state["messages"]) == 1
         ])
         
@@ -189,7 +409,7 @@ Starting new research conversation. Previous draft and resources have been clear
         message = state["messages"][-1].content.lower()
         if "delete" in message and ("everything" in message or "all" in message):
             state["resources"] = []
-            state["report"] = ""  # Also clear the report when deleting everything
+            state["report"] = ""
             return {
                 "resources": [],
                 "report": "",
@@ -299,6 +519,7 @@ Available resources: {resources}
             WriteResearchQuestion,
             DeleteResources,
             ArxivSearchTool(),
+            pdf_tool,
         ],
         **ainvoke_kwargs
     ).ainvoke([
@@ -340,7 +561,6 @@ STATUS: Error
                 }
                 state["resources"].append(new_resource)
             
-            # Replace the report instead of appending
             new_report = f"ArXiv Paper Analysis:\n\n"
             for paper in papers:
                 new_report += f"Title: {paper['title']}\n"
@@ -382,7 +602,6 @@ STATUS: Error
             search_results = result["results"]
             urls = []
             
-            # Create a detailed search report
             new_report = "# Web Search Results Analysis\n\n"
             new_report += "## Found Resources\n\n"
             
@@ -400,9 +619,6 @@ STATUS: Error
                 new_report += f"URL: {result['url']}\n"
                 new_report += f"Summary: {result['summary']}\n\n"
             
-
-
-                # Add synthesis section to report
             new_report += "## Synthesis of Findings\n\n"
             new_report += "### Main Themes\n"
             new_report += "* Summary points from across sources\n"
@@ -430,15 +646,14 @@ Found {len(search_results)} relevant resources. Updated report."""
             
         elif tool_call["name"] == "WriteReport":
             report_content = tool_call["args"].get("report", "")
-        
-            # Add resource citations and references
+            
             if state["resources"]:
                 report_content += "\n\n## References and Sources\n\n"
                 for idx, resource in enumerate(state["resources"], 1):
                     report_content += f"{idx}. [{resource['title']}]({resource['url']})\n"
                     report_content += f"   - Summary: {resource['description']}\n\n"
             return {
-                "report": tool_call["args"].get("report", ""),  # Replace entire report
+                "report": report_content,
                 "messages": [ai_message, ToolMessage(
                     tool_call_id=tool_call["id"],
                     content="""
@@ -470,7 +685,7 @@ Research question has been written."""
             urls_to_delete = tool_call["args"].get("urls", [])
             if not urls_to_delete:
                 state["resources"] = []
-                state["report"] = ""  # Also clear the report when deleting everything
+                state["report"] = ""
                 return {
                     "resources": [],
                     "report": "",
@@ -500,6 +715,21 @@ ACTION: Delete Specific Resources
 {len(urls_to_delete)} resources have been deleted."""
                     )]
                 }
+        
+        elif tool_call["name"] == "save_report_pdf":
+            result = await pdf_tool._arun(state.get("report", ""))
+            return {
+                "messages": [response, ToolMessage(
+                    tool_call_id=tool_call["id"],
+                    content=f"""
+===================================
+AGENT: PDF Generator
+ACTION: Save Report
+===================================
+
+{result}"""
+                )]
+            }
 
     if isinstance(response, AIMessage):
         sources_used = [r["url"] for r in resources if hasattr(r, "url")]
@@ -515,3 +745,7 @@ SOURCES: {', '.join(sources_used) if sources_used else 'None'}
     return {
         "messages": response
     }
+    
+    
+    
+    

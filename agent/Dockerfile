@@ -5,6 +5,11 @@ WORKDIR /asset
 
 ENV POETRY_VIRTUALENVS_CREATE=false
 
+# Install system dependencies including DejaVu fonts
+RUN apt-get update && \
+    apt-get install -y fonts-dejavu && \
+    rm -rf /var/lib/apt/lists/*
+
 # Install poetry
 RUN pip install poetry
 

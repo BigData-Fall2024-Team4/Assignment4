@@ -13,6 +13,19 @@ from research_canvas.download import get_resource
 import requests
 import re
 import json
+from tavily import TavilyClient
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+
+# Load environment variables
+load_dotenv()
+env_path = Path('.') / '.env'
+load_dotenv(dotenv_path=env_path)
+
+# Initialize Tavily client
+tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY", "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"))
 
 class ArxivSearchInput(BaseModel):
     """Input for ArXiv search."""
@@ -70,22 +83,36 @@ class ArxivSearchTool(BaseTool):
 
 class WebSearchTool(BaseTool):
     name: str = "web_search"
-    description: str = "Performs a web search and returns structured results."
+    description: str = "Performs a web search and returns structured results using Tavily."
     args_schema: type[SearchInput] = SearchInput
 
     def _run(self, queries: List[str], max_results: int = 5) -> str:
         try:
-            results = []
+            all_results = []
+            
             for query in queries:
-                results.append({
-                    "title": f"Search Results for: {query}",
-                    "url": f"https://example.com/search?q={query}",
-                    "summary": f"Retrieved information about {query}..."
-                })
+                # Use Tavily search for each query
+                response = tavily_client.search(
+                    query=query,
+                    max_results=max_results,
+                    search_depth="advanced"
+                )
+                
+                # Process results
+                for result in response['results']:
+                    all_results.append({
+                        "title": result['title'],
+                        "url": result['url'],
+                        "summary": result['content']
+                    })
+                    
+                    # Break if we have enough results
+                    if len(all_results) >= max_results:
+                        break
             
             return json.dumps({
-                "results": results,
-                "total": len(results)
+                "results": all_results[:max_results],
+                "total": len(all_results[:max_results])
             })
         except Exception as e:
             return json.dumps({"error": f"Error performing web search: {str(e)}"})
@@ -122,6 +149,37 @@ async def chat_node(state: AgentState, config: RunnableConfig):
         emit_tool_calls="DeleteResources"
     )
 
+    # Initialize or reset state based on new conversation
+    if state["messages"] and isinstance(state["messages"][-1], HumanMessage):
+        # Check if this is a new conversation by looking at the message content
+        message = state["messages"][-1].content.lower()
+        
+        # Reset conditions - add more as needed
+        should_reset = any([
+            "new research" in message,
+            "start over" in message,
+            "new topic" in message,
+            # If this is the first message in a conversation
+            len(state["messages"]) == 1
+        ])
+        
+        if should_reset:
+            state["resources"] = []
+            state["report"] = ""
+            state["research_question"] = ""
+            return {
+                "resources": [],
+                "report": "",
+                "research_question": "",
+                "messages": [AIMessage(content="""
+=================================== 
+AGENT: State Manager
+ACTION: Reset State
+===================================
+
+Starting new research conversation. Previous draft and resources have been cleared.""")]
+            }
+
     state["resources"] = state.get("resources", [])
     research_question = state.get("research_question", "")
     report = state.get("report", "")
@@ -131,15 +189,17 @@ async def chat_node(state: AgentState, config: RunnableConfig):
         message = state["messages"][-1].content.lower()
         if "delete" in message and ("everything" in message or "all" in message):
             state["resources"] = []
+            state["report"] = ""  # Also clear the report when deleting everything
             return {
                 "resources": [],
+                "report": "",
                 "messages": [AIMessage(content="""
 =================================== 
 AGENT: Resource Manager
 ACTION: Delete All Resources 
 ===================================
 
-All resources have been deleted.""")]
+All resources and report have been deleted.""")]
             }
 
     # Check for ArXiv query
@@ -169,18 +229,59 @@ All resources have been deleted.""")]
         ainvoke_kwargs["parallel_tool_calls"] = False
 
     system_message = f"""
-    You are a research assistant that helps users find information and write reports.
-    
-    Important instructions:
-    {'- Use the search_arxiv tool for this query.' if is_arxiv_query else '- Use the web_search tool for this query.'}
-    - Use WriteReport tool to update the report with new findings
-    - Always indicate the source of information in your response
-    - If a research question exists, do not ask for it again
-    
-    Research question: {research_question}
-    Current report: {report}
-    Available resources: {resources}
-    """
+You are a research assistant that helps users find information and write reports.
+
+Important instructions:
+Agent Identification:
+- At the start of EVERY response, indicate which agent you are using:
+  "Agent: ArXiv Search" or "Agent: Web Search"
+{'- Use the search_arxiv tool for this query.' if is_arxiv_query else '- Use the web_search tool for this query.'}
+- Use WriteReport tool to update the report with new findings
+- Always indicate the source of information in your response
+- If a research question exists, do not ask for it again
+
+Report Structure:
+# Research Report
+
+## Key Points
+- Main discoveries and findings
+- Critical insights from papers
+- Important metrics and results
+
+## Main Body
+
+### Background
+- Research context and significance
+- Current state of the field
+- Research gaps identified
+
+### Methodology
+- Research approaches used
+- Data collection methods
+- Analysis techniques
+
+### Results and Analysis
+- Synthesis of key findings
+- Comparison across papers
+- Statistical significance
+- Key implications
+
+## Summary and Conclusions
+- Major findings synthesis
+- Research implications
+- Future research directions
+- Practical applications
+
+Research question: {research_question}
+Current report: {report}
+Available resources: {resources}
+
+Format Guidelines:
+- Use markdown headers (##) for sections
+- Use bullet points (*) for lists
+- Include citations [Author, Year]
+- Use blockquotes (>) for important quotes
+"""
 
     response = await model.bind_tools(
         [
@@ -230,10 +331,8 @@ STATUS: Error
                 }
                 state["resources"].append(new_resource)
             
-            new_report = report
-            if new_report:
-                new_report += "\n\n"
-            new_report += f"ArXiv Paper Analysis:\n\n"
+            # Replace the report instead of appending
+            new_report = f"ArXiv Paper Analysis:\n\n"
             for paper in papers:
                 new_report += f"Title: {paper['title']}\n"
                 new_report += f"ArXiv ID: {paper['arxiv_id']}\n"
@@ -250,7 +349,7 @@ AGENT: ArXiv Search
 SOURCES: {', '.join(urls)}
 ===================================
 
-Found {len(papers)} papers. Added to resources and report."""
+Found {len(papers)} papers. Updated resources and report."""
                 )]
             }
             
@@ -274,10 +373,8 @@ STATUS: Error
             search_results = result["results"]
             urls = []
             
-            new_report = report
-            if new_report:
-                new_report += "\n\n"
-            new_report += f"Web Search Results:\n\n"
+            # Replace the report instead of appending
+            new_report = f"Web Search Results:\n\n"
             
             for result in search_results:
                 urls.append(result["url"])
@@ -303,13 +400,13 @@ AGENT: Web Search
 SOURCES: {', '.join(urls)}
 ===================================
 
-Found {len(search_results)} relevant resources. Added to report."""
+Found {len(search_results)} relevant resources. Updated report."""
                 )]
             }
             
         elif tool_call["name"] == "WriteReport":
             return {
-                "report": tool_call["args"].get("report", ""),
+                "report": tool_call["args"].get("report", ""),  # Replace entire report
                 "messages": [ai_message, ToolMessage(
                     tool_call_id=tool_call["id"],
                     content="""
@@ -341,8 +438,10 @@ Research question has been written."""
             urls_to_delete = tool_call["args"].get("urls", [])
             if not urls_to_delete:
                 state["resources"] = []
+                state["report"] = ""  # Also clear the report when deleting everything
                 return {
                     "resources": [],
+                    "report": "",
                     "messages": [ai_message, ToolMessage(
                         tool_call_id=tool_call["id"],
                         content="""
@@ -351,7 +450,7 @@ AGENT: Resource Manager
 ACTION: Delete All Resources
 ===================================
 
-All resources have been deleted."""
+All resources and report have been deleted."""
                     )]
                 }
             else:

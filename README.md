@@ -7,7 +7,7 @@
 - Airflow Link (hosted on GCP): 
 - FastAPI Link (hosted on GCP): 
 - Demo Video URL: [Project Demo]()
-- Google Codelabs: [Project Tutorial](https://codelabs-preview.appspot.com/?file_id=1uiqzGhuxnrQjMPBM3qMWyLu2PDQk0fb3b7AS80Es128#4)
+- Google Codelabs: [Project Tutorial](https://codelabs-preview.appspot.com/?file_id=1uiqzGhuxnrQjMPBM3qMWyLu2PDQk0fb3b7AS80Es128#0)
 
 ## Goal of the Project
 This project builds an end-to-end research tool that combines document processing, vector storage, and multi-agent interactions to create an intelligent research assistant. The system uses Airflow for pipeline orchestration, Pinecone for vector storage, and Langraph for multi-agent coordination.

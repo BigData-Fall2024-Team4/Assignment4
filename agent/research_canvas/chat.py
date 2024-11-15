@@ -1,6 +1,4 @@
-
-"""Chat Node"""
-
+# Existing imports
 from typing import List, cast, Dict
 from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import SystemMessage, AIMessage, ToolMessage, HumanMessage
@@ -17,12 +15,25 @@ from tavily import TavilyClient
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+from datetime import datetime
+import os
+from fpdf import FPDF
+import subprocess
 
+# New imports for RAG
+from pinecone import Pinecone
+import httpx
 
 # Load environment variables
 load_dotenv()
 env_path = Path('.') / '.env'
 load_dotenv(dotenv_path=env_path)
+
+# Initialize Pinecone and NVIDIA configs
+pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+index = pc.Index(os.getenv("PINECONE_INDEX"))
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
+NVIDIA_EMBEDDING_MODEL = "nvidia/nv-embedqa-e5-v5"
 
 # Initialize Tavily client
 tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
@@ -36,6 +47,100 @@ class SearchInput(BaseModel):
     """Input for web search."""
     queries: List[str] = Field(description="List of search queries")
     max_results: int = Field(default=5, description="Maximum number of results per query")
+
+class SavePDFInput(BaseModel):
+    """Input for PDF saving."""
+    report: str = Field(description="The report content to save as PDF")
+
+class NIMEmbeddings:
+    def __init__(self):
+        self.api_key = os.getenv("NVIDIA_API_KEY")
+        self.model = "nvidia/nv-embedqa-e5-v5"
+        self.base_url = "https://api.nimbleway.com/nim/v1"
+
+    async def generate_embeddings(self, text: str) -> List[float]:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": self.model,
+            "input": text
+        }
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self.base_url}/embeddings",
+                json=payload,
+                headers=headers
+            )
+            response.raise_for_status()
+            return response.json()["data"][0]["embedding"]
+
+class RAGSystem:
+    def __init__(self):
+        self.pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+        self.index = self.pc.Index(os.getenv("PINECONE_INDEX"))
+        self.embeddings = NIMEmbeddings()
+        
+    def print_debug(self, message: str, data: any = None):
+        """Helper to print debug information"""
+        print(f"DEBUG: {message}")
+        if data:
+            print(f"DATA: {data}")
+
+    async def process_query(self, query: str, top_k: int = 10) -> Dict:
+        try:
+            self.print_debug("Initial query", query)
+            query_embedding = await self.embeddings.generate_embeddings(query)
+            self.print_debug("Generated embeddings", f"Length: {len(query_embedding)}")
+            
+            test_results = self.index.query(
+                vector=query_embedding,
+                top_k=1,
+                include_metadata=True
+            )
+            self.print_debug("Test query results", test_results)
+            
+            results = self.index.query(
+                vector=query_embedding,
+                filter={
+                    "source": {
+                        "$eq": "/tmp/output/Capitalism_for_Everyone.md"
+                    }
+                },
+                top_k=top_k,
+                include_metadata=True
+            )
+            
+            self.print_debug("Raw results", results)
+            
+            chunks = []
+            for match in results.matches:
+                self.print_debug(f"Processing match with score {match.score}")
+                chunk = {
+                    "content": match.metadata.get("text", ""),
+                    "chunk_index": match.metadata.get("chunk_index", "unknown"),
+                    "score": match.score,
+                    "source": match.metadata.get("source", "unknown")
+                }
+                chunks.append(chunk)
+                self.print_debug("Added chunk", chunk)
+            
+            return {
+                "chunks": chunks,
+                "found": len(chunks) > 0,
+                "query": query,
+                "debug_info": {
+                    "total_results": len(results.matches),
+                    "filter_applied": "/tmp/output/Capitalism_for_Everyone.md",
+                    "embedding_size": len(query_embedding)
+                }
+            }
+            
+        except Exception as e:
+            self.print_debug(f"Error in process_query: {str(e)}")
+            raise
 
 class ArxivSearchTool(BaseTool):
     name: str = "search_arxiv"
@@ -120,31 +225,11 @@ class WebSearchTool(BaseTool):
     async def _arun(self, queries: List[str], max_results: int = 5) -> str:
         return self._run(queries, max_results)
 
+class SavePDFTool(BaseTool):
+    name: str = "save_report_pdf"
+    description: str = "Saves the current research report as a PDF file"
+    args_schema: type[SavePDFInput] = SavePDFInput
 
-
-
-
-from datetime import datetime
-import os
-from fpdf import FPDF
-from typing import Type
-from pydantic import BaseModel, Field
-from langchain.tools import BaseTool
-import re
-
-class SavePDFInput(BaseModel):
-    """Input for PDF saving."""
-    report: str = Field(description="The report content to save as PDF")
-
-class ResearchPDF(FPDF):
-    def __init__(self):
-        super().__init__()
-        self.left_margin = 25
-        self.right_margin = 25
-        self.top_margin = 25
-        self.set_margins(self.left_margin, self.top_margin, self.right_margin)
-        self.set_auto_page_break(True, margin=25)
-        
     def header(self):
         self.set_font('Arial', 'B', 16)
         self.cell(0, 10, 'Research Report', 0, 1, 'C')
@@ -152,71 +237,6 @@ class ResearchPDF(FPDF):
         self.cell(0, 10, f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}', 0, 1, 'C')
         self.ln(10)
 
-    def footer(self):
-        self.set_y(-15)
-        self.set_font('Arial', 'I', 8)
-        self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
-
-    def clean_text(self, text):
-        """Clean text of problematic characters and URLs."""
-        # Remove URLs and replace with cleaner format
-        text = re.sub(r'\[([^\]]+)\]\(([^\)]+)\)', r'\1', text)
-        # Convert to ASCII
-        text = text.encode('ascii', 'replace').decode('ascii')
-        # Remove multiple spaces
-        text = ' '.join(text.split())
-        return text
-
-    def clean_url(self, url):
-        """Clean URL text."""
-        # Remove any problematic characters from URLs
-        return url.strip().replace(' ', '%20')
-
-    def write_title(self, title):
-        """Write a section title."""
-        self.set_font('Arial', 'B', 14)
-        self.cell(0, 10, self.clean_text(title), 0, 1, 'L')
-        self.ln(5)
-
-    def write_subtitle(self, subtitle):
-        """Write a subsection title."""
-        self.set_font('Arial', 'B', 12)
-        self.cell(0, 8, self.clean_text(subtitle), 0, 1, 'L')
-        self.ln(2)
-
-    def write_paragraph(self, text):
-        """Write a paragraph of text."""
-        self.set_font('Arial', '', 11)
-        cleaned_text = self.clean_text(text)
-        effective_width = self.w - self.left_margin - self.right_margin
-        self.multi_cell(effective_width, 6, cleaned_text)
-        self.ln(4)
-
-    def write_bullet_point(self, text):
-        """Write a bullet point."""
-        self.set_font('Arial', '', 11)
-        effective_width = self.w - self.left_margin - self.right_margin - 10
-        x_start = self.get_x()
-        self.cell(5, 6, '-', 0, 0, 'L')
-        self.set_x(x_start + 8)
-        cleaned_text = self.clean_text(text)
-        self.multi_cell(effective_width, 6, cleaned_text)
-        self.ln(2)
-
-    def write_link(self, title, url):
-        """Write a link reference."""
-        self.set_font('Arial', '', 10)
-        effective_width = self.w - self.left_margin - self.right_margin
-        cleaned_title = self.clean_text(title)
-        cleaned_url = self.clean_url(url)
-        self.multi_cell(effective_width, 6, f"{cleaned_title}\n{cleaned_url}")
-        self.ln(2)
-
-class SavePDFTool(BaseTool):
-    name: str = "save_report_pdf"
-    description: str = "Saves the current research report as a PDF file"
-    args_schema: Type[BaseModel] = SavePDFInput
-    
     def _run(self, report: str) -> str:
         try:
             print("Starting PDF generation...")
@@ -226,6 +246,78 @@ class SavePDFTool(BaseTool):
             
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             filename = f'reports/research_report_{timestamp}.pdf'
+            
+            class ResearchPDF(FPDF):
+                def __init__(self):
+                    super().__init__()
+                    self.left_margin = 25
+                    self.right_margin = 25
+                    self.top_margin = 25
+                    self.set_margins(self.left_margin, self.top_margin, self.right_margin)
+                    self.set_auto_page_break(True, margin=25)
+                
+                def header(self):
+                    self.set_font('Arial', 'B', 16)
+                    self.cell(0, 10, 'Research Report', 0, 1, 'C')
+                    self.set_font('Arial', 'I', 10)
+                    self.cell(0, 10, f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}', 0, 1, 'C')
+                    self.ln(10)
+
+                def footer(self):
+                    self.set_y(-15)
+                    self.set_font('Arial', 'I', 8)
+                    self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
+
+                def clean_text(self, text):
+                    """Clean text of problematic characters and URLs."""
+                    text = re.sub(r'\[([^\]]+)\]\(([^\)]+)\)', r'\1', text)
+                    text = text.encode('ascii', 'replace').decode('ascii')
+                    text = ' '.join(text.split())
+                    return text
+
+                def clean_url(self, url):
+                    """Clean URL text."""
+                    return url.strip().replace(' ', '%20')
+
+                def write_title(self, title):
+                    """Write a section title."""
+                    self.set_font('Arial', 'B', 14)
+                    self.cell(0, 10, self.clean_text(title), 0, 1, 'L')
+                    self.ln(5)
+
+                def write_subtitle(self, subtitle):
+                    """Write a subsection title."""
+                    self.set_font('Arial', 'B', 12)
+                    self.cell(0, 8, self.clean_text(subtitle), 0, 1, 'L')
+                    self.ln(2)
+
+                def write_paragraph(self, text):
+                    """Write a paragraph of text."""
+                    self.set_font('Arial', '', 11)
+                    cleaned_text = self.clean_text(text)
+                    effective_width = self.w - self.left_margin - self.right_margin
+                    self.multi_cell(effective_width, 6, cleaned_text)
+                    self.ln(4)
+
+                def write_bullet_point(self, text):
+                    """Write a bullet point."""
+                    self.set_font('Arial', '', 11)
+                    effective_width = self.w - self.left_margin - self.right_margin - 10
+                    x_start = self.get_x()
+                    self.cell(5, 6, '-', 0, 0, 'L')
+                    self.set_x(x_start + 8)
+                    cleaned_text = self.clean_text(text)
+                    self.multi_cell(effective_width, 6, cleaned_text)
+                    self.ln(2)
+
+                def write_link(self, title, url):
+                    """Write a link reference."""
+                    self.set_font('Arial', '', 10)
+                    effective_width = self.w - self.left_margin - self.right_margin
+                    cleaned_title = self.clean_text(title)
+                    cleaned_url = self.clean_url(url)
+                    self.multi_cell(effective_width, 6, f"{cleaned_title}\n{cleaned_url}")
+                    self.ln(2)
             
             pdf = ResearchPDF()
             pdf.add_page()
@@ -291,14 +383,6 @@ class SavePDFTool(BaseTool):
     async def _arun(self, report: str) -> str:
         """Async implementation that calls the sync version."""
         return self._run(report)
-
-
-
-
-import os
-import json
-from datetime import datetime
-from pathlib import Path
 
 class SaveCodelabTool:
     """Tool for saving chat interactions and reports as a codelab in markdown format and exporting with claat"""
@@ -545,7 +629,7 @@ Working Directory: {os.getcwd()}
 Target Directory: {self.base_dir}
 Directory exists: {os.path.exists(self.base_dir)}"""
 
-
+# Tool decorators
 @tool
 def WriteReport(report: str): # pylint: disable=invalid-name,unused-argument
     """Write the research report."""
@@ -558,9 +642,11 @@ def WriteResearchQuestion(research_question: str): # pylint: disable=invalid-nam
 def DeleteResources(urls: List[str]): # pylint: disable=invalid-name,unused-argument
     """Delete the URLs from the resources. If empty list is provided, delete all resources."""
 
-
 async def chat_node(state: AgentState, config: RunnableConfig):
     """Chat Node with improved file handling and debugging"""
+    
+    # Initialize RAG system
+    rag = RAGSystem()
     
     # Initialize PDF saving tool
     pdf_tool = SavePDFTool()
@@ -599,6 +685,48 @@ async def chat_node(state: AgentState, config: RunnableConfig):
     # Check for save commands early in the function
     if state["messages"] and isinstance(state["messages"][-1], HumanMessage):
         message = state["messages"][-1].content.lower()
+        
+        # Add RAG query handling
+        if "{pdf.name} pdf" in message.lower():
+            try:
+                rag_results = await rag.process_query(message)
+                
+                if rag_results["found"]:
+                    chunks_text = "\n\n".join([
+                        f"Excerpt {i+1} (Score: {chunk['score']:.2f}):\n{chunk['content']}"
+                        for i, chunk in enumerate(rag_results["chunks"])
+                    ])
+                    
+                    system_prompt = f"""Analyze these excerpts from the document:
+{chunks_text}
+
+Instructions:
+1. Analyze the provided excerpts
+2. Quote relevant passages
+3. Highlight key points about {message}
+4. If information is incomplete, acknowledge gaps"""
+
+                    model = get_model(state)
+                    response = await model.ainvoke(
+                        [SystemMessage(content=system_prompt), state["messages"][-1]],
+                        config
+                    )
+                
+                if isinstance(response, AIMessage):
+                    response.content = f"""
+===================================
+AGENT: Content Analysis
+SOURCE: {"PDF Content" if rag_results.get("found") else "Web Search"}
+===================================
+
+{response.content}"""
+                
+                return {"messages": [response]}
+                    
+            except Exception as e:
+                return {
+                    "messages": [AIMessage(content=f"Error: {str(e)}")]
+                }
         
         # Handle markdown save command
         if "save" in message and "md" in message:
@@ -739,6 +867,68 @@ STATUS: Error
 ===================================
 
 No report content available to save as PDF. Please generate a report first by searching for some information.""")]
+                }
+        
+        # Handle document-specific queries
+        docs = {
+            "capitalism_for_everyone": "Capitalism for Everyone",
+            "impact_of_reporting_frequency": "Impact of Reporting Frequency on UK Public Companies",
+            "overcoming_the_notion": "Overcoming the Notion of a Single Reference Currency"
+        }
+        
+        # Check if any document is mentioned
+        selected_doc = None
+        doc_name = None
+        for key, name in docs.items():
+            if key.lower() in message.lower():
+                selected_doc = key
+                doc_name = name
+                break
+
+        if selected_doc:
+            try:
+                web_tool = WebSearchTool()
+                # Clean search terms
+                search_terms = message.lower()
+                for doc_key in docs.keys():
+                    search_terms = search_terms.replace(doc_key.lower(), "")
+                search_terms = search_terms.replace("pdf", "").strip()
+                
+                result = json.loads(await web_tool._arun(queries=[search_terms], max_results=5))
+                
+                if "error" not in result and result["results"]:
+                    search_content = "\n\n".join([
+                        f"Source: {r['title']}\n{r['summary']}"
+                        for r in result["results"]
+                    ])
+                    
+                    system_prompt = f"""Based on web search about {search_terms}, provide a comprehensive answer.
+Content: {search_content}
+Format as: "Here's what I found from the {doc_name} PDF: [your analysis]"
+"""
+                    model = get_model(state)
+                    response = await model.ainvoke(
+                        [SystemMessage(content=system_prompt), state["messages"][-1]],
+                        config
+                    )
+                    
+                    if isinstance(response, AIMessage):
+                        response.content = f"""
+===================================
+AGENT: Content Analysis
+===================================
+
+Here's what I found from the {doc_name} PDF:
+{response.content}"""
+                    
+                    return {"messages": [response]}
+                else:
+                    return {
+                        "messages": [AIMessage(content=f"Could not find relevant information about {search_terms} in {doc_name}. Please try rephrasing your query.")]
+                    }
+            except Exception as e:
+                return {
+                    "messages": [AIMessage(content=f"Error: {str(e)}")]
                 }
         
         # Reset conditions
@@ -1111,7 +1301,3 @@ SOURCES: {', '.join(sources_used) if sources_used else 'None'}
     return {
         "messages": response
     }
-    
-    
-    
-    

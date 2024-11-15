@@ -47,6 +47,10 @@ reportlab = "^4.2.5"
 markdown = "^3.7"
 weasyprint = "^63.0"
 fpdf2 = "^2.8.1"
+pinecone-client = "^5.0.1"
+transformers = "^4.46.2"
+torch = "^2.5.1"
+sentence-transformers = "^3.3.0"
 
 [tool.poetry.scripts]
 demo = "research_canvas.demo:main"

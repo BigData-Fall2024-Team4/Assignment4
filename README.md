@@ -148,4 +148,9 @@ The system is deployed on Google Cloud Platform using Docker containers:
 - Developer 3: Frontend & Export Functionality
 
 ## Additional Notes
+| Name                            | Percentage Contribution |
+| ------------------------------- | ----------------------- |
+| Sarthak Somvanshi               | 33.33% |
+| Yuga Kanse                      | 33.33% |
+| Tanvi Inchanalkar               | 33.33% |
 WE ATTEST THAT WE HAVEN'T USED ANY OTHER STUDENTS' WORK IN OUR ASSIGNMENT AND ABIDE BY THE POLICIES LISTED IN THE STUDENT HANDBOOK.

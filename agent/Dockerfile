@@ -10,6 +10,10 @@ RUN apt-get update && \
     apt-get install -y fonts-dejavu && \
     rm -rf /var/lib/apt/lists/*
 
+# Create directories and set permissions
+RUN mkdir -p /asset/chat_outputs /asset/reports && \
+    chmod -R 777 /asset/chat_outputs /asset/reports
+
 # Install poetry
 RUN pip install poetry
 
@@ -19,7 +23,10 @@ COPY .env ./
 RUN poetry config virtualenvs.create false \
     && poetry install --no-interaction --no-ansi
 
-# Then copy the application code
+# Copy the application code
 COPY ./ ./
+
+# Ensure volume mount points have correct permissions
+RUN chmod -R 777 /asset/chat_outputs /asset/reports
 
 CMD ["poetry", "run", "demo"]

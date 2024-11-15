@@ -3,9 +3,9 @@
 # AI-Powered Research Tool Documentation
 
 ## Project Resources
-- Copolit App link (hosted on GCP): 
-- Airflow Link (hosted on GCP): 
-- FastAPI Link (hosted on GCP): 
+- Copolit App link (hosted on GCP): 34.57.239.217:3000
+- Airflow Link (hosted on GCP): 34.172.235.53:8080
+- FastAPI Link (hosted on GCP): 34.57.239.217:8000
 - Demo Video URL: [Project Demo]()
 - Google Codelabs: [Codelabs](https://codelabs-preview.appspot.com/?file_id=1uiqzGhuxnrQjMPBM3qMWyLu2PDQk0fb3b7AS80Es128#0)
 

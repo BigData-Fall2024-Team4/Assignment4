@@ -23,4 +23,8 @@ services:
     env_file:
       - ./agent/.env
     volumes:
-      - ./reports:/asset/reports  # Mount the reports directory
+      # Using absolute paths and ensuring directories exist
+      - ${PWD}/chat_outputs:/asset/chat_outputs
+      - ${PWD}/reports:/asset/reports
+    environment:
+      - HOST_PWD=${PWD}

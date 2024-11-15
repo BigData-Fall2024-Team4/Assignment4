@@ -295,6 +295,256 @@ class SavePDFTool(BaseTool):
 
 
 
+import os
+import json
+from datetime import datetime
+from pathlib import Path
+
+class SaveCodelabTool:
+    """Tool for saving chat interactions and reports as a codelab in markdown format and exporting with claat"""
+    
+    def __init__(self):
+        self.name = "save_codelab"
+        self.description = "Saves the chat interaction and report as a codelab markdown file and exports it"
+        self.base_dir = 'codelabs'
+        os.makedirs(self.base_dir, exist_ok=True)
+    
+    def _format_messages(self, messages, report=None):
+        """Format messages into markdown codelab structure"""
+        # Original metadata format
+        codelab_content = """summary: Interactive CodeLab
+id: interactive-codelab
+categories: codelab
+environments: web
+status: Published
+feedback link: https://github.com/googlecodelabs/tools
+analytics account: UA-XXXXXXXX-1
+authors: Generated
+duration: 10
+
+# Interactive CodeLab
+
+"""
+        
+        # Add duration steps
+        step_number = 0
+
+        # Add report if available
+        if report:
+            step_number += 1
+            codelab_content += f"## Step {step_number}: Research Report\n\n"
+            codelab_content += f"Duration: 5:00\n\n"
+            codelab_content += report + "\n\n"
+            codelab_content += "Positive\n: ✅ Research findings reviewed\n\n"
+            codelab_content += "Negative\n: ❌ Additional research may be needed\n\n"
+
+        # Format conversation into steps
+        current_step = None
+        for msg in messages:
+            if isinstance(msg, HumanMessage):
+                step_number += 1
+                current_step = f"## Step {step_number}: User Query\n\nDuration: 5:00\n\n"
+                current_step += f"{msg.content}\n\n"
+            elif isinstance(msg, AIMessage):
+                if current_step:
+                    current_step += "### Response\n\n"
+                    content = msg.content
+                    
+                    # Remove agent header if present
+                    if "===================================" in content:
+                        content = content.split("===================================")[-1].strip()
+                    
+                    current_step += f"{content}\n\n"
+                    
+                    if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                        current_step += "### Tool Output\n\n"
+                        for tool_call in msg.tool_calls:
+                            current_step += f"```python\n{tool_call['name']}: {json.dumps(tool_call['args'], indent=2)}\n```\n\n"
+                    
+                    codelab_content += current_step
+                    current_step = None
+            elif isinstance(msg, ToolMessage):
+                if current_step:
+                    current_step += "### Tool Message\n\n"
+                    current_step += f"```\n{msg.content}\n```\n\n"
+
+        # Add final step with summary
+        step_number += 1
+        codelab_content += f"""## Step {step_number}: Summary and Next Steps
+
+Duration: 5:00
+
+### Key Takeaways
+
+* Review the research findings above
+* Consider the conversation history
+* Examine tool interactions and outputs
+
+Positive
+: ✅ You've completed this interactive research codelab
+: ✅ You can now apply these insights to your work
+
+Negative
+: ❌ Remember to verify all findings independently
+: ❌ Consider seeking additional sources for validation
+
+### Next Steps
+
+1. Review all research findings
+2. Validate key information
+3. Apply insights to your project
+
+"""
+
+        return codelab_content
+
+    async def _arun(self, messages, state=None, **kwargs):
+        """Save markdown file and run claat export"""
+        try:
+            # Get report from state if available
+            report = state.get("report", "") if state else ""
+            
+            # Create markdown file
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            md_filename = f"codelab_{timestamp}.md"
+            md_path = os.path.join(self.base_dir, md_filename)
+            
+            # Save markdown content with report
+            content = self._format_messages(messages, report)
+            
+            # Debug: Print content structure
+            print(f"Generated content structure:\n{content[:500]}...")
+            
+            with open(md_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            
+            print(f"Created markdown file: {md_path}")
+            
+            # Run claat export command
+            try:
+                result = subprocess.run(
+                    ['claat', 'export', md_path],
+                    capture_output=True,
+                    text=True,
+                    cwd=self.base_dir
+                )
+                
+                if result.returncode == 0:
+                    codelab_dir = os.path.join(self.base_dir, md_filename[:-3])
+                    
+                    if os.path.exists(codelab_dir):
+                        return f"""
+===================================
+AGENT: Codelab Generator
+STATUS: Success
+===================================
+
+1. Markdown file created: {md_path}
+2. Codelab exported successfully: {codelab_dir}
+3. CLAAT Output: {result.stdout}
+
+Content structure:
+- Original metadata preserved
+- Report included as Step 1 (if provided)
+- Each conversation part as a numbered step
+- Summary as final step
+
+You can find:
+- Markdown file at: {md_path}
+- Generated codelab at: {codelab_dir}
+
+To verify format:
+1. Check {md_path} content
+2. Ensure metadata section matches original
+3. Verify step numbering and duration tags"""
+                    else:
+                        return f"""
+===================================
+AGENT: Codelab Generator
+STATUS: Partial Success
+===================================
+
+Markdown file created: {md_path}
+
+CLAAT Export failed to create directory
+STDOUT: {result.stdout}
+STDERR: {result.stderr}
+Return Code: {result.returncode}
+
+To verify markdown format:
+cat {md_path}
+
+Please run manually:
+cd {self.base_dir}
+claat export {md_filename}"""
+                else:
+                    return f"""
+===================================
+AGENT: Codelab Generator
+STATUS: Partial Success
+===================================
+
+Markdown file created: {md_path}
+
+CLAAT Export failed
+STDOUT: {result.stdout}
+STDERR: {result.stderr}
+Return Code: {result.returncode}
+
+To verify markdown format:
+cat {md_path}
+
+Please verify claat installation and run manually:
+cd {self.base_dir}
+claat export {md_filename}"""
+                    
+            except FileNotFoundError:
+                return f"""
+===================================
+AGENT: Codelab Generator
+STATUS: Partial Success
+===================================
+
+Markdown file created: {md_path}
+
+CLAAT not found in PATH. Please:
+1. Install claat: go install github.com/googlecodelabs/tools/claat@latest
+2. Add to PATH: export PATH=$PATH:$(go env GOPATH)/bin
+3. Run manually:
+   cd {self.base_dir}
+   claat export {md_filename}"""
+                
+            except Exception as e:
+                return f"""
+===================================
+AGENT: Codelab Generator
+STATUS: Partial Success
+===================================
+
+Markdown file created: {md_path}
+
+CLAAT Export error: {str(e)}
+
+To verify markdown format:
+cat {md_path}
+
+Please run manually:
+cd {self.base_dir}
+claat export {md_filename}"""
+                
+        except Exception as e:
+            return f"""
+===================================
+AGENT: Codelab Generator
+STATUS: Error
+===================================
+
+Failed to create markdown file: {str(e)}
+
+Working Directory: {os.getcwd()}
+Target Directory: {self.base_dir}
+Directory exists: {os.path.exists(self.base_dir)}"""
+
 
 @tool
 def WriteReport(report: str): # pylint: disable=invalid-name,unused-argument
@@ -308,11 +558,29 @@ def WriteResearchQuestion(research_question: str): # pylint: disable=invalid-nam
 def DeleteResources(urls: List[str]): # pylint: disable=invalid-name,unused-argument
     """Delete the URLs from the resources. If empty list is provided, delete all resources."""
 
-async def chat_node(state: AgentState, config: RunnableConfig):
-    """Chat Node"""
 
+async def chat_node(state: AgentState, config: RunnableConfig):
+    """Chat Node with improved file handling and debugging"""
+    
     # Initialize PDF saving tool
     pdf_tool = SavePDFTool()
+    
+    # Create base directories with more permissive permissions
+    BASE_DIRS = ['chat_outputs', 'reports']
+    for directory in BASE_DIRS:
+        try:
+            # Make directory with full permissions (777)
+            os.makedirs(directory, mode=0o777, exist_ok=True)
+            os.chmod(directory, 0o777)
+            print(f"Successfully created/verified directory {directory} with permissions 777")
+        except Exception as e:
+            print(f"Warning: Failed to create/set permissions for {directory}: {str(e)}")
+            # Try to get current permissions if directory exists
+            try:
+                current_perms = oct(os.stat(directory).st_mode)[-3:]
+                print(f"Current permissions for {directory}: {current_perms}")
+            except:
+                print(f"Could not read permissions for {directory}")
 
     config = copilotkit_customize_config(
         config,
@@ -325,19 +593,120 @@ async def chat_node(state: AgentState, config: RunnableConfig):
             "tool": "WriteResearchQuestion",
             "tool_argument": "research_question",
         }],
-        emit_tool_calls=["DeleteResources", "save_report_pdf"]  # Add PDF tool to emit_tool_calls
+        emit_tool_calls=["DeleteResources", "save_report_pdf"]
     )
 
-    # Check for PDF save command early in the function
+    # Check for save commands early in the function
     if state["messages"] and isinstance(state["messages"][-1], HumanMessage):
         message = state["messages"][-1].content.lower()
-        if "save" in message and "pdf" in message:
+        
+        # Handle markdown save command
+        if "save" in message and "md" in message:
+            try:
+                # Print current working directory and verify chat_outputs exists
+                cwd = os.getcwd()
+                print(f"Current working directory: {cwd}")
+                print(f"chat_outputs exists: {os.path.exists('chat_outputs')}")
+                
+                # Generate timestamp for filename
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = os.path.join("chat_outputs", f"chat_{timestamp}.md")
+                
+                # Format messages into markdown
+                md_content = "# Chat History\n\n"
+                
+                for msg in state["messages"]:
+                    if isinstance(msg, HumanMessage):
+                        md_content += "## Question\n\n"
+                        md_content += f"{msg.content}\n\n"
+                    elif isinstance(msg, AIMessage):
+                        md_content += "## Response\n\n"
+                        md_content += f"{msg.content}\n\n"
+                    elif isinstance(msg, ToolMessage):
+                        md_content += "### Tool Output\n\n"
+                        md_content += f"```\n{msg.content}\n```\n\n"
+
+                # Print debug info before saving
+                print(f"Attempting to save to: {filename}")
+                
+                # Create parent directory again just to be sure
+                os.makedirs("chat_outputs", mode=0o777, exist_ok=True)
+                
+                # Save to file with explicit encoding and full permissions
+                with open(filename, "w", encoding="utf-8") as f:
+                    f.write(md_content)
+                
+                # Set file permissions to be fully readable/writable
+                os.chmod(filename, 0o666)
+                
+                # Get absolute path and verify file was created
+                abs_path = os.path.abspath(filename)
+                file_exists = os.path.exists(filename)
+                
+                print(f"File saved successfully: {file_exists}")
+                print(f"Absolute path: {abs_path}")
+                
+                return {
+                    "messages": [AIMessage(content=f"""
+===================================
+AGENT: Markdown Generator
+ACTION: Save Chat History
+STATUS: Success
+===================================
+
+Chat history has been saved to: {abs_path}
+File exists: {file_exists}
+Directory permissions: {oct(os.stat('chat_outputs').st_mode)[-3:]}
+File permissions: {oct(os.stat(filename).st_mode)[-3:]}
+Working directory: {cwd}""")]
+                }
+            except Exception as e:
+                # Enhanced error reporting
+                cwd = os.getcwd()
+                error_details = []
+                
+                try:
+                    error_details.append(f"Working Directory: {cwd}")
+                    error_details.append(f"Directory exists: {os.path.exists('chat_outputs')}")
+                    if os.path.exists('chat_outputs'):
+                        error_details.append(f"Directory permissions: {oct(os.stat('chat_outputs').st_mode)[-3:]}")
+                    error_details.append(f"Python process user: {os.getuid()}")
+                    error_details.append(f"Python process group: {os.getgid()}")
+                except Exception as debug_e:
+                    error_details.append(f"Debug error: {str(debug_e)}")
+                
+                return {
+                    "messages": [AIMessage(content=f"""
+===================================
+AGENT: Markdown Generator
+ACTION: Save Chat History
+STATUS: Error
+===================================
+
+Failed to save chat history: {str(e)}
+
+Debug Information:
+{chr(10).join(error_details)}
+
+Error Type: {type(e).__name__}
+Full Error: {str(e)}
+
+Please ensure:
+1. The application has write permissions in the current directory
+2. The chat_outputs directory exists and is writable
+3. There is sufficient disk space
+4. The path is accessible from the current working directory
+
+Contact support if the issue persists.""")]
+                }
+
+        # Handle PDF save command
+        elif "save" in message and "pdf" in message:
             report = state.get("report", "")
             if report:
                 try:
-                    # Directly call the PDF tool
-                    result = pdf_tool._run(report)  # Use _run instead of _arun
-                    print(f"PDF Generation Result: {result}")  # Add debugging
+                    result = pdf_tool._run(report)
+                    print(f"PDF Generation Result: {result}")
                     return {
                         "messages": [AIMessage(content=f"""
 ===================================
@@ -351,7 +720,7 @@ STATUS: Success
 The PDF has been saved in the 'reports' directory.""")]
                     }
                 except Exception as e:
-                    print(f"PDF Generation Error: {str(e)}")  # Add debugging
+                    print(f"PDF Generation Error: {str(e)}")
                     return {
                         "messages": [AIMessage(content=f"""
 ===================================
@@ -465,15 +834,15 @@ Agent Identification:
 Report Structure:
 # Research Report
 
-## Key Points
+### Key Points
 - Main discoveries and findings from sources
 - Critical insights with source citations
 - Important metrics and results
 
-## Sources Overview
+### Sources Overview
 {chr(10).join([f'- [{r["title"]}]({r["url"]})' for r in resources]) if resources else '- No sources yet'}
 
-## Main Body
+### Main Body
 
 ### Background
 - Research context with source citations
@@ -491,10 +860,10 @@ Report Structure:
 - Statistical significance
 - Key implications
 
-## Source Details
+### Source Details
 {chr(10).join([f'### {r["title"]}\n- URL: {r["url"]}\n- Summary: {r["description"]}\n' for r in resources]) if resources else '- No sources yet'}
 
-## Summary and Conclusions
+### Summary and Conclusions
 - Major findings synthesis with citations
 - Research implications
 - Future research directions

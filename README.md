@@ -3,7 +3,7 @@
 # AI-Powered Research Tool Documentation
 
 ## Project Resources
-- Streamlit App link (hosted on GCP): 
+- Copolit App link (hosted on GCP): 
 - Airflow Link (hosted on GCP): 
 - FastAPI Link (hosted on GCP): 
 - Demo Video URL: [Project Demo]()

@@ -25,7 +25,7 @@ env_path = Path('.') / '.env'
 load_dotenv(dotenv_path=env_path)
 
 # Initialize Tavily client
-tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY", "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"))
+tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
 
 class ArxivSearchInput(BaseModel):
     """Input for ArXiv search."""
@@ -347,7 +347,7 @@ duration: 10
                 current_step += f"{msg.content}\n\n"
             elif isinstance(msg, AIMessage):
                 if current_step:
-                    current_step += "### Response\n\n"
+                    current_step += "Response\n\n"
                     content = msg.content
                     
                     # Remove agent header if present
@@ -620,11 +620,8 @@ async def chat_node(state: AgentState, config: RunnableConfig):
                         md_content += "## Question\n\n"
                         md_content += f"{msg.content}\n\n"
                     elif isinstance(msg, AIMessage):
-                        md_content += "## Response\n\n"
+                        md_content += "Response\n\n"
                         md_content += f"{msg.content}\n\n"
-                    elif isinstance(msg, ToolMessage):
-                        md_content += "### Tool Output\n\n"
-                        md_content += f"```\n{msg.content}\n```\n\n"
 
                 # Print debug info before saving
                 print(f"Attempting to save to: {filename}")

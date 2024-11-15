@@ -1,0 +1,25 @@
+{
+  "environment": "web",
+  "format": "html",
+  "prefix": "https://storage.googleapis.com",
+  "mainga": "UA-49880327-14",
+  "updated": "2024-11-15T12:14:23-05:00",
+  "id": "chat_20241115_170708",
+  "duration": 0,
+  "title": "Chat History",
+  "summary": "A sample codelab to test installation",
+  "source": "chat_20241115_170708.md",
+  "theme": "",
+  "status": [
+    "published"
+  ],
+  "category": [
+    "test"
+  ],
+  "tags": [
+    "web"
+  ],
+  "feedback": "https://github.com/yourusername/feedback",
+  "ga": "UA-123456-1",
+  "url": "chat_20241115_170708"
+}
